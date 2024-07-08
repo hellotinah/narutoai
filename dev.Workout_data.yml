@@ -1,0 +1,115 @@
+id: Workout_data
+namespace: dev
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks: 
+      - id: API_request
+        type: io.kestra.plugin.scripts.python.Script
+        beforeCommands:
+            - pip install --upgrade pip
+            - pip install pandas > /dev/null
+        warningOnStdErr: false
+        script: |
+          import requests
+          import urllib3
+          import pandas as pd
+
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+          auth_url = "https://www.strava.com/oauth/token"
+          activites_url = "https://www.strava.com/api/v3/athlete/activities"
+
+          payload = {
+              'client_id': "{{ secret('CLIENT_ID_STRAVA') }}",
+              'client_secret': "{{ secret('CLIENT_SECRET_STRAVA') }}",
+              'refresh_token': "{{ secret('REFRESH_TOKEN_STRAVA') }}",
+              'grant_type': "refresh_token",
+              'f': 'json'
+          }
+          print("Requesting Token...\n")
+          res = requests.post(auth_url, data=payload, verify=False)
+          access_token = res.json()['access_token']
+          print("Access Token = {}\n".format(access_token))
+
+          header = {'Authorization': 'Bearer ' + access_token}
+          param = {'per_page': 200, 'page': 1}
+          my_dataset = requests.get(activites_url, headers=header, params=param).json()
+
+          print(my_dataset[0]["name"])
+          print(my_dataset[0]["map"]["summary_polyline"])
+          
+          # Convert JSON data to DataFrame
+          df = pd.json_normalize(my_dataset)
+
+          # Save DataFrame to CSV file
+          df.to_csv('{{outputDir}}/workout.csv', index=False)
+      
+      - id: exportFiles
+        type: io.kestra.plugin.core.storage.LocalFiles
+        outputs:
+          - "workout.csv"
+
+  - id: working_dir_two
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks: 
+      - id: workoutdata_Queries
+        type: io.kestra.plugin.scripts.python.Script
+        beforeCommands:
+          - pip install pandas > /dev/null
+        script: |
+          import pandas as pd
+
+          # Read the CSV file
+          df = pd.read_csv("{{ outputs.API_request.outputFiles['workout.csv'] }}")
+
+          # Select the desired columns
+          selected_columns = ['sport_type', 'start_date', 'distance', 'average_speed']
+
+          # Extract the date part from the start_date column
+          df['start_date'] = pd.to_datetime(df['start_date']).dt.strftime('%Y-%m-%d')
+
+          # Convert the taskrun.Date to the desired format
+          taskrun_Date = '{{ taskrun.startDate | date("yyyy-MM-dd") }}'.strip()
+
+          # Filter rows based on the taskrun_Date
+          filtered_df = df[df['start_date'] == taskrun_Date]
+
+          # Save the filtered DataFrame to a new CSV file
+          filtered_df[selected_columns].to_csv("{{outputDir}}/filtered_activities.csv", index=False)
+
+      - id: exportFiles_two
+        type: io.kestra.plugin.core.storage.LocalFiles
+        outputs:
+          - "filtered_activities.csv"
+
+  - id: load_csv_tobigquery
+    type: "io.kestra.plugin.gcp.bigquery.Load"
+    from: "{{ outputs.workoutdata_Queries.outputFiles['filtered_activities.csv'] }}"
+    serviceAccount: "{{ secret('SERVICE_ACCOUNT') }}"
+    projectId: "compelling-pact-326521"
+    destinationTable: "compelling-pact-326521.workout_strava.daily_workout"
+    format: CSV
+    csvOptions:
+      fieldDelimiter: ","
+      skipLeadingRows: 1
+    schema:
+      fields:
+        - name: Sport Type
+          type: STRING
+        - name: Start Date
+          type: DATE
+        - name: Distance
+          type: FLOAT64
+        - name: Average Speed
+          type: FLOAT64
+outputs:
+  - id: some_output
+    type: STRING
+    value: "{{ outputs.workoutdata_Queries.outputFiles['filtered_activities.csv'] }}"
+
+triggers:
+  - id: daily
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 20 * * *"

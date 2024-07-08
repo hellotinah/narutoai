@@ -1,0 +1,66 @@
+id: daily_report_workout
+namespace: dev
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks:  
+      - id: save_data
+        type: io.kestra.plugin.scripts.python.Script
+        warningOnStdErr: false
+        script: |
+          import csv
+          import json
+
+          # Simulate the input data
+          rows = '{{ trigger.rows }}'
+          print(f"Raw rows: {rows}")
+
+          # Load the rows from the trigger input
+          rows = json.loads(rows)
+          print(f"Parsed rows: {rows}")
+
+          # Define the field names
+          fieldnames = rows[0].keys()
+
+          # Write the data to a CSV file
+          csv_file = "{{ outputDir }}/daily_workout_data.csv"
+          with open(csv_file, 'w', newline='') as csvfile:
+              writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+              
+              # Write header
+              writer.writeheader()
+              
+              # Write rows
+              for row in rows:
+                  writer.writerow(row)
+          
+          print(f"CSV file '{csv_file}' has been created.")
+          
+      - id: exportFiles
+        type: io.kestra.plugin.core.storage.LocalFiles
+        outputs:
+          - "daily_workout_data.csv"
+
+  - id: send_data
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ secret('DISCORD_WEBHOOK') }}"
+    method: POST
+    contentType: multipart/form-data
+    formData:
+      file:
+        name: "daily_workout_data.csv"
+        content: "{{ outputs.save_data.outputFiles['daily_workout_data.csv'] }}"
+      payload_json: |
+        {
+          "content": "Here is your today's workout!"
+        }
+
+triggers:
+  - id: watch
+    type: io.kestra.plugin.gcp.bigquery.Trigger
+    interval: "PT02M"  # Adjust the interval to run every 24 hours, (for testing, adjust  the interval to run every 2 min)
+    serviceAccount: "{{ secret('SERVICE_ACCOUNT') }}"
+    projectId: "compelling-pact-326521"
+    sql: "SELECT * FROM workout_strava.workout_strava_demo WHERE `Start Date` = CURRENT_DATE();"
+    fetch: true

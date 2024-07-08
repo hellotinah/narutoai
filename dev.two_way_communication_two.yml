@@ -1,0 +1,147 @@
+id: two_way_communication_two
+namespace: dev
+
+tasks:
+    - id: wdir
+      type: io.kestra.plugin.core.flow.WorkingDirectory
+      tasks:  
+        - id: download_file
+          type: io.kestra.plugin.core.http.Download
+          headers:
+            user-agent: "kestra-io"
+          uri: "{{ trigger.body.image }}"
+        - id: "python_macros"
+          type: "io.kestra.plugin.scripts.python.Script"
+          script: |
+              import requests
+              import json
+              import csv
+              import base64
+
+              # Set the endpoint URL
+              url = "https://api.openai.com/v1/chat/completions"
+
+              # Set your OpenAI API key
+              api_key = "{{ secret('OPENAI_API_KEY') }}"
+
+              # Read the image file as binary data
+              with open("{{ outputs.download_file.uri }}", "rb") as f:
+                image_data = f.read()
+              # Encode the binary image data to base64
+              image_base64 = base64.b64encode(image_data).decode("utf-8")
+              # Construct the data URL with the appropriate MIME type
+              image_url = f"data:image/jpg;base64,{image_base64}"
+              # Define the conversation history
+            
+              messages = [
+              {"role": "user", "content": "Please give me the macronutrient breakdown in terms of protein, carbs, and fats of a package of a dish of shrimp cooked in garlic and olive oil, served in a small pot, just please try to estimates. One discret number for each macronutrient. Your answer should be in the following format: Protein: number '%'', Carbs: number '%'', Fat: number '%' "}
+              ]
+
+              # Set the request data
+              data = {
+                "model": "gpt-4-vision-preview",
+                "messages": messages
+              }
+              headers = {
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {api_key}"
+              }
+              # Send the HTTP POST request
+              response = requests.post(url, json=data, headers=headers)
+
+              # Parse the JSON response
+              response_json = response.json()
+              print(response_json)
+              # Extract the response content
+              response_content = response_json['choices'][0]['message']['content']
+
+              # Extract percentages from the response content
+              macronutrients = {}
+              lines = response_content.split(',')
+              for line in lines:
+                  if ':' in line:
+                    key, value = line.split(':')  # Split only on the first occurrence of ':'
+                    key = key.strip()
+                    value = value.strip().replace('%', '')
+                    macronutrients[key] = value
+
+              # Save the response_content to a text file:
+              l = open("{{outputDir}}/macros.txt", "a")
+              l.write(response_content)
+              l.close()
+              
+              # Write the data to a CSV file
+              csv_file_path = "{{outputDir}}/macronutrients.csv"
+              with open(csv_file_path, mode='w', newline='') as file:
+                  writer = csv.writer(file)
+                  writer.writerow(['Macronutrient', 'Percentage'])
+                  for key, value in macronutrients.items():
+                      writer.writerow([key, value])
+
+              print(f"CSV file saved to {csv_file_path}")
+              # Write the JSON response to a file
+              #with open("{{outputDir}}/myfile.json", "w") as f:
+              #  json.dump(response_json, f)
+
+
+        - id: exportFiles
+          type: io.kestra.plugin.core.storage.LocalFiles
+          outputs:
+            - "macronutrients.csv"
+            - "macros.txt"
+
+    - id: parse_text
+      type: io.kestra.plugin.tika.Parse
+      from: "{{ outputs.python_macros.outputFiles['macros.txt'] }}"
+      contentType: TEXT
+      store: false
+
+    - id: send_todiscord_macro
+      type: io.kestra.plugin.notifications.discord.DiscordExecution
+      url: "{{ secret('DISCORD_WEBHOOK') }}"
+      username: "AnimeAI"
+      content: "Your meal is a dish of shrimp cooked in garlic and olive oil, served in a small pot. The estimated macros are: {{ outputs.parse_text.result.content }}"
+
+    - id: load_csv_tobigquery
+      type: "io.kestra.plugin.gcp.bigquery.Load"
+      from: "{{ outputs.python_macros.outputFiles['macronutrients.csv'] }}"
+      serviceAccount: "{{ secret('SERVICE_ACCOUNT') }}"
+      projectId: "compelling-pact-326521"
+      destinationTable: "compelling-pact-326521.macros.dailymacros"
+      format: CSV
+      csvOptions:
+        fieldDelimiter: ","
+        skipLeadingRows: 1
+      schema:
+        fields:
+            - name: Date
+              type: DATE
+            - name: Protein
+              type: FLOAT64
+            - name: Fat
+              type: FLOAT64
+            - name: Carbohydrate
+              type: FLOAT64
+        
+    - id: anime_food
+      type: io.kestra.plugin.openai.CreateImage
+      apiKey: "{{ secret('OPENAI_API_KEY') }}"
+      n: 1
+      download: true
+      clientTimeout: 30
+      prompt: "Using the image provided as a reference, can you generate an image of Naruto from the Naruto anime enjoying the same meal? Please depict Naruto in his typical attire, savoring the food depicted in the image. Feel free to add any additional elements to enhance the scene."
+
+    - id: send_data
+      type: io.kestra.plugin.core.http.Request
+      uri: "{{ secret('DISCORD_WEBHOOK') }}"
+      method: POST
+      contentType: multipart/form-data
+      formData:
+          file:
+            name: "anime.jpg"
+            content: "{{ outputs.anime_food.images[0] }}"
+
+triggers:
+  - id: discord_webhook_trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: KlntkzwVGBM9yMrjm3yv9v

@@ -1,0 +1,97 @@
+id: daily_report_nutrition
+namespace: dev
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks:  
+      - id: save_data
+        type: io.kestra.plugin.scripts.python.Script
+        beforeCommands:
+          - pip install --upgrade pip
+          - pip install pandas > /dev/null
+          - pip install pandas matplotlib > /dev/null
+        warningOnStdErr: false
+        script: |
+          import csv
+          import json
+          import pandas as pd
+          import matplotlib.pyplot as plt
+
+          # Simulate the input data
+          rows = '{{ trigger.rows }}'
+          print(f"Raw rows: {rows}")
+
+          # Load the rows from the trigger input
+          rows = json.loads(rows)
+          print(f"Parsed rows: {rows}")
+
+          # Define the field names
+          fieldnames = rows[0].keys()
+
+          # Write the data to a CSV file
+          csv_file = "{{ outputDir }}/daily_nutrition_data.csv"
+          with open(csv_file, 'w', newline='') as csvfile:
+              writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+              
+              # Write header
+              writer.writeheader()
+              
+              # Write rows
+              for row in rows:
+                  writer.writerow(row)
+          
+          print(f"CSV file '{csv_file}' has been created.")
+          # Create DataFrame
+          df = pd.read_csv('{{ outputDir }}/daily_nutrition_data.csv')
+          # Group by Date and sum the values
+          grouped_df = df.groupby('Date').sum()
+          # Calculate the averages
+          average_protein = grouped_df['Protein'].mean()
+          average_fat = grouped_df['Fat'].mean()
+          average_carbohydrate = grouped_df['Carbohydrate'].mean()
+
+          # Data for pie chart
+          labels = ['Protein', 'Fat', 'Carbohydrate']
+          sizes = [average_protein, average_fat, average_carbohydrate]
+          colors = ['#ff9999','#66b3ff','#99ff99']
+          explode = (0.1, 0, 0)  # explode the first slice
+          # Create the pie chart
+          fig1, ax1 = plt.subplots()
+          ax1.pie(sizes, explode=explode, labels=labels, colors=colors, autopct='%1.1f%%',
+                  shadow=True, startangle=90)
+          ax1.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+
+          plt.title('Average Nutrition Distribution for today:')
+          # Save the figure
+          plt.savefig('{{ outputDir }}/average_nutrition_distribution.png')
+
+          # Optionally, also display the chart
+          plt.show()
+      - id: exportFiles
+        type: io.kestra.plugin.core.storage.LocalFiles
+        outputs:
+          - "average_nutrition_distribution.png"
+    
+  - id: send_data
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ secret('DISCORD_WEBHOOK') }}"
+    method: POST
+    contentType: multipart/form-data
+    formData:
+      file:
+        name: "average_nutrition_distribution.png"
+        content: "{{ outputs.save_data.outputFiles['average_nutrition_distribution.png'] }}"
+      payload_json: |
+        {
+          "content": "and here is you nutrition distribution of today!"
+        }
+
+triggers:
+  - id: watch
+    type: io.kestra.plugin.gcp.bigquery.Trigger
+    interval: "PT02M"  # Adjust the interval to run every 24 hours, (for testing, adjust  the interval to run every 2 min)
+    serviceAccount: "{{ secret('SERVICE_ACCOUNT') }}"
+    projectId: "compelling-pact-326521"
+    sql: "SELECT * FROM macros.daily_macros_demo WHERE `Date` = CURRENT_DATE();"
+    fetch: true

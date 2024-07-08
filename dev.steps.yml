@@ -1,0 +1,45 @@
+id: steps
+namespace: dev
+
+tasks:
+  - id: save_data
+    type: io.kestra.plugin.scripts.python.Script
+    warningOnStdErr: false
+    script: |
+      import json
+
+      # Load the rows from the trigger input (assuming `trigger.body` contains valid JSON)
+      # Simulate the input data
+      rows = '{{ trigger.rows }}'
+      print(f"Raw rows: {rows}")
+
+      # Load the rows from the trigger input
+      rows = json.loads(rows)
+
+      # Extract the value of "Total Steps" from the row
+      total_step_value = rows[0]["Total Steps"]
+
+      # Write total_step_value to a text file (steps.txt)
+      with open("{{outputDir}}/steps.txt", "w") as f:
+          f.write(str(total_step_value) + "\n")
+
+  - id: parse_text
+    type: io.kestra.plugin.tika.Parse
+    from: "{{ outputs.save_data.outputFiles['steps.txt'] }}"
+    contentType: TEXT
+    store: false
+
+  - id: send_todiscord_macro
+    type: io.kestra.plugin.notifications.discord.DiscordExecution
+    url: "{{ secret('DISCORD_WEBHOOK') }}"
+    username: "NarutoAI"
+    content: "Your total steps for today is {{ outputs.parse_text.result.content }}"
+
+triggers:
+  - id: watch
+    type: io.kestra.plugin.gcp.bigquery.Trigger
+    interval: "PT02M"  # Adjust the interval to run every 24 hours, (for testing, adjust  the interval to run every 2 min)
+    serviceAccount: "{{ secret('SERVICE_ACCOUNT') }}"
+    projectId: "compelling-pact-326521"
+    sql: "SELECT `Date`, `Total Steps` FROM workout_strava.totalsteps_demo WHERE `Date` = CURRENT_DATE();"
+    fetch: true

@@ -1,0 +1,112 @@
+id: Remind_me
+namespace: dev
+
+tasks: 
+  - id: working_directory
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks: 
+      - id: pandas
+        type: io.kestra.plugin.scripts.python.Script
+        beforeCommands:
+            - pip install --upgrade pip
+            - pip install pandas > /dev/null
+        warningOnStdErr: false
+        outputFiles:
+          - "*.csv"
+        script: |
+          import sqlite3
+          import re
+          import requests
+          import json
+          from datetime import datetime, timedelta
+          import pandas as pd
+
+          def time_difference(current_time, stored_time):
+            stored_datetime = datetime.strptime(stored_time, '%H:%M:%S')
+            current_datetime = datetime.strptime(current_time.strftime('%H:%M:%S'), '%H:%M:%S')
+            return stored_datetime - current_datetime
+
+          def send_reminder(title):
+            webhook_url = "{{ secret('DISCORD_WEBHOOK') }}"
+            payload = {"username": "NarutoAI", "content": f"Don't forget to {title}!"}
+            response = requests.post(webhook_url, data=json.dumps(payload), headers={'Content-Type': 'application/json'})
+            if response.status_code != 204:
+                print(f"Failed to send reminder: {response.text}")
+
+          conn = sqlite3.connect('your_database.db')
+          cursor = conn.cursor()
+
+          cursor.execute('''
+          CREATE TABLE IF NOT EXISTS events (
+              Title TEXT NOT NULL,
+              Time TEXT NOT NULL,
+              Date TEXT NOT NULL
+          )''')
+
+          df = pd.DataFrame(columns=['Title', 'Time', 'Date'])
+          pattern = r"Remind me please to (.+) at (\d{2}:\d{2})"
+          js = '{{ trigger.body }}'
+          data = json.loads(js)
+          text_message = data.get('content', '')
+          match = re.match(pattern, text_message)
+          if match:
+              title = match.group(1)
+              time = match.group(2)
+              # Ensure time is in HH:MM:SS format
+              time = f"{time}:00"
+              current_date = datetime.now().strftime('%Y-%m-%d')
+              cursor.execute("INSERT INTO events (Title, Time, Date) VALUES (?, ?, ?)", (title, time, current_date))
+              conn.commit()
+
+          cursor.execute("SELECT Title, Time, Date FROM events")
+          rows = cursor.fetchall()
+          today_date = datetime.now().strftime('%Y-%m-%d')
+          for row in rows:
+            if row[2] == today_date:
+              stored_time = row[1]
+              current_time = datetime.now() + timedelta(hours=1)
+              diff = time_difference(current_time, stored_time)
+              if timedelta(minutes=0) <= diff < timedelta(minutes=2):
+                  send_reminder(row[0])
+              else:
+                  print("Nothing to remind you about at:", stored_time)
+
+          new_df = pd.DataFrame(rows, columns=['Title', 'Time', 'Date'])
+          if not df.empty:
+              df = pd.concat([df, new_df]).drop_duplicates().reset_index(drop=True)
+          else:
+              df = new_df
+
+          df.to_csv("data.csv", index=False)
+          conn.commit()
+          cursor.close()
+          conn.close()
+
+      - id: exportFiles_two
+        type: io.kestra.plugin.core.storage.LocalFiles
+        outputs:
+          - data.csv
+
+  - id: load_csv_tobigquery
+    type: "io.kestra.plugin.gcp.bigquery.Load"
+    from: "{{ outputs.pandas.outputFiles['data.csv'] }}"
+    serviceAccount: "{{ secret('SERVICE_ACCOUNT') }}"
+    projectId: "compelling-pact-326521"
+    destinationTable: "compelling-pact-326521.events.reminders"
+    format: CSV
+    csvOptions:
+      fieldDelimiter: ","
+      skipLeadingRows: 1
+    schema:
+      fields:
+        - name: Title
+          type: STRING
+        - name: Time
+          type: TIME
+        - name: Date
+          type: DATE
+
+triggers:
+  - id: discord_webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: 4wjtkzwVGBM9yKnjm3yv8u

@@ -1,0 +1,40 @@
+id: daily_meditation
+namespace: dev
+
+inputs:
+  - id: prompt
+    type: STRING
+    defaults: You are the anime character "Naruto". Write an SMS to me.
+      Telling me to chill for 10 min and meditate for a while.
+      Say something inspiring  and encouraging. 
+      The greeting should be very short like "Hi!".
+      The message should be between 80 and 160 characters long.
+      Sign the message at the end with "Naruto"
+
+tasks:
+  - id: completion
+    type: io.kestra.plugin.openai.ChatCompletion
+    apiKey: "{{ secret('OPENAI_API_KEY') }}"
+    model: gpt-4
+    prompt: "{{inputs.prompt}}"
+
+  - id: response
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{outputs.completion.choices[0].message.content}}"
+
+  - id: send_discord_message
+    type: io.kestra.plugin.notifications.discord.DiscordIncomingWebhook
+    url: "{{ secret('DISCORD_WEBHOOK') }}"
+    payload: |
+      {
+        "username": "NarutoAI",
+        "tts": false,
+        "content": "{{outputs.completion.choices[0].message.content}}"
+      }
+
+
+triggers:
+  - id: everyMonday
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: 0 9 * * *
+

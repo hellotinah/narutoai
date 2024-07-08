@@ -1,0 +1,133 @@
+id: Remind_me_dependency
+namespace: dev
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks:  
+      - id: save_data
+        type: io.kestra.plugin.scripts.python.Script
+        warningOnStdErr: false
+        script: |
+          import csv
+          import json
+
+          # Simulate the input data
+          rows = '{{ trigger.rows }}'
+          print(f"Raw rows: {rows}")
+
+          # Load the rows from the trigger input
+          rows = json.loads(rows)
+          print(f"Parsed rows: {rows}")
+
+          # Define the field names
+          fieldnames = rows[0].keys()
+
+          # Write the data to a CSV file
+          csv_file = "{{ outputDir }}/events.csv"
+          with open(csv_file, 'w', newline='') as csvfile:
+              writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+              
+              # Write header
+              writer.writeheader()
+              
+              # Write rows
+              for row in rows:
+                  writer.writerow(row)
+          
+          print(f"CSV file '{csv_file}' has been created.")
+          
+      - id: exportFiles
+        type: io.kestra.plugin.core.storage.LocalFiles
+        outputs:
+          - "events.csv"
+
+  - id: check_every2min
+    type: io.kestra.plugin.scripts.python.Script
+    containerImage: ghcr.io/kestra-io/kestrapy:latest
+    beforeCommands:
+      - pip install --upgrade pip
+      - pip install pandas > /dev/null
+    script: |
+      import datetime
+      from datetime import timedelta, datetime
+      import pandas as pd
+      import json
+      import requests
+
+      def time_difference(current_time, stored_time):
+          # Convert stored_time to datetime object
+          try:
+              stored_datetime = datetime.strptime(stored_time, '%H:%M:%S')
+          except ValueError:
+              stored_datetime = datetime.strptime(stored_time, '%H:%M')
+          
+          # Format current_time as string and add one hour
+          current_time_str = current_time.strftime('%H:%M:%S')
+          # Convert current_time_str to datetime object
+          current_datetime = datetime.strptime(current_time_str, '%H:%M:%S')
+          
+          diff = stored_datetime - current_datetime
+          return diff
+
+      # Load the DataFrame from the CSV file
+      csv_file_path = "{{ outputs.save_data.outputFiles['events.csv'] }}"
+      df = pd.read_csv(csv_file_path)
+      print("file uploaded")
+
+      # Get the current date
+      current_date = datetime.now().strftime('%Y-%m-%d')
+      print(current_date)
+
+      print("DataFrame content:")
+      print(df)
+      # Iterate over each row in the DataFrame
+      for index, row in df.iterrows():
+          print(f"Row {index}:")
+          for col in df.columns:
+              print(f"  {col}: {row[col]}")
+      # Iterate over each row in the DataFrame
+      for index, row in df.iterrows():
+          # Check if the stored date is equal to the current date
+          if row['Date'] == current_date:
+              stored_time = row['Time']
+              print("Row:", row)
+              # Get the current time
+              current_time = datetime.now()
+              # Add one hour to the current time
+              current_time += timedelta(hours=1)
+
+              # Calculate the time difference
+              diff = time_difference(current_time, stored_time)
+              print("Current Time:", current_time)
+              print("Stored Time:", stored_time)
+              print("Difference:", diff)
+
+              if diff < timedelta(minutes=2) and diff >= timedelta(minutes=0):
+                  print("It is time for:", stored_time)
+                  # Define the webhook URL
+                  webhook_url = "{{ secret('DISCORD_WEBHOOK') }}"
+
+                  # Define the message payload
+                  payload = {
+                      "username": "NarutoAI",
+                      "content": f"Don't forget to {row['Title']}!"
+                  }
+
+                  # Send the HTTP POST request to the webhook URL
+                  response = requests.post(webhook_url, data=json.dumps(payload), headers={'Content-Type': 'application/json'})
+                  print("Webhook response:", response.status_code)
+              else:
+                  print("Nothing to remind you about at:", stored_time)
+          else:
+              print("Stored date is not equal to the current date")
+
+
+triggers:
+  - id: watch
+    type: io.kestra.plugin.gcp.bigquery.Trigger
+    interval: "PT2M"  # Adjust the interval to run every 2min
+    serviceAccount: "{{ secret('SERVICE_ACCOUNT') }}"
+    projectId: "compelling-pact-326521"
+    sql: "SELECT * FROM events.reminders WHERE `Date` = CURRENT_DATE();"
+    fetch: true
